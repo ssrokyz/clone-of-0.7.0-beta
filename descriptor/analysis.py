@@ -24,7 +24,6 @@ class FingerprintPlot:
         from matplotlib import pyplot
         from matplotlib.backends.backend_pdf import PdfPages
 
-
         self.compile_fingerprints(images)
 
         self.figures = {}

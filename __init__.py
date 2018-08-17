@@ -26,7 +26,7 @@ try:
 except ImportError:
     warnings.warn('Did not find fortran modules.')
 else:
-    fmodules_version = 11
+    fmodules_version = 9
     wrong_version = fmodules.check_version(version=fmodules_version)
     if wrong_version:
         raise RuntimeError('fortran modules are not updated. Recompile '
@@ -36,6 +36,9 @@ else:
 version_file = os.path.join(os.path.split(os.path.abspath(__file__))[0],
                             'VERSION')
 _ampversion = open(version_file).read().strip()
+#version_file = open(os.path.join(os.path.abspath(__file__), 'VERSION'))
+#_ampversion = version_file.read().strip()
+#_ampversion = 'nothing'
 
 
 class Amp(Calculator, object):
@@ -52,8 +55,7 @@ class Amp(Calculator, object):
         weights, and scalings; for more information see docstring for the class
         NeuralNetwork.
     label : str
-        Default prefix/location used for all files. Setting to None disables
-        logging.
+        Default prefix/location used for all files.
     dblabel : str
         Optional separate prefix/location for database files, including
         fingerprints, fingerprint derivatives, and neighborlists. This file
@@ -72,7 +74,7 @@ class Amp(Calculator, object):
         ASE atoms objects with positions, symbols, energy, and forces in ASE
         format.
     """
-    implemented_properties = ['energy', 'forces']
+    implemented_properties = ['energy', 'forces', 'energies']  ## ssrokyz
 
     def __init__(self, descriptor, model, label='amp', dblabel=None,
                  cores=None, envcommand=None, logging=True, atoms=None):
@@ -90,6 +92,9 @@ class Amp(Calculator, object):
         self.cores = cores  # Note this calls 'assign_cores'.
 
         self.dblabel = label if dblabel is None else dblabel
+
+    def get_atomic_potentials(self, atoms=None):  ## ssrokyz start
+        return Calculator.get_property(self, 'energies', atoms)  ## ssrokyz end
 
     @property
     def cores(self):
@@ -113,7 +118,8 @@ class Amp(Calculator, object):
 
     @property
     def descriptor(self):
-        """Get or set the atomic descriptor.
+        """
+        Get or set the atomic descriptor.
 
         Parameters
         ----------
@@ -128,11 +134,12 @@ class Amp(Calculator, object):
         # the main Amp instance. Then descriptor can pull parameters directly
         # from Amp without needing them to be passed in each method call.
         self._descriptor = descriptor
-        self.reset()  # Clears any calculation results.
+        self.reset()  # Clears any old calculations.
 
     @property
     def model(self):
-        """Get or set the machine-learning model.
+        """
+        Get or set the machine-learning model.
 
         Parameters
         ----------
@@ -147,7 +154,7 @@ class Amp(Calculator, object):
         # Amp instance. Then model can pull parameters directly from Amp
         # without needing them to be passed in each method call.
         self._model = model
-        self.reset()  # Clears any calculation results.
+        self.reset()  # Clears any old calculations.
 
     @classmethod
     def load(Cls, file, Descriptor=None, Model=None, **kwargs):
@@ -156,8 +163,8 @@ class Amp(Calculator, object):
         Only a filename or file-like object is required, in typical cases.
 
         If using a home-rolled descriptor or model, also supply uninstantiated
-        classes to those models, as in Model=MyModel.
-        (Not as Model=MyModel()!)
+        classes to those models, as in Model=MyModel.  (Not as
+        Model=MyModel()!)
 
         Any additional keyword arguments (such as label or dblabel) can be
         fed through to Amp.
@@ -235,7 +242,9 @@ class Amp(Calculator, object):
         self._printheader(self._log)
 
     def calculate(self, atoms, properties, system_changes):
-        """Calculation of the energy of system and forces of all atoms."""
+        """Calculation of the energy of system and forces of all atoms.
+
+        """
         # The inherited method below just sets the atoms object,
         # if specified, to self.atoms.
         Calculator.calculate(self, atoms, properties, system_changes)
@@ -251,84 +260,27 @@ class Amp(Calculator, object):
             self.descriptor.calculate_fingerprints(images=images,
                                                    log=log,
                                                    calculate_derivatives=False)
-            if self.model.__class__.__name__ != 'KernelRidge':
-                energy = self.model.calculate_energy(
-                        self.descriptor.fingerprints[key]
-                        )
-
-            else:  # KRR needs training images.
-                fingerprints = self.descriptor.fingerprints
-
-                log('Loading the training set')
-
-                if isinstance(self.model.trainingimages, str):
-                    trainingimages = hash_images(
-                            ase.io.Trajectory(self.model.trainingimages)
-                            )
-                else:
-                    trainingimages = hash_images(self.model.trainingimages)
-
-                self.descriptor.calculate_fingerprints(
-                        images=trainingimages,
-                        log=log,
-                        calculate_derivatives=False
-                        )
-                fp_trainingimages = self.descriptor.fingerprints
-
-                energy = self.model.calculate_energy(
-                        fingerprints,
-                        hash=key,
-                        trainingimages=trainingimages,
-                        fp_trainingimages=fp_trainingimages
-                        )
+            energy = self.model.calculate_energy(
+                self.descriptor.fingerprints[key])
             self.results['energy'] = energy
             log('...potential energy calculated.', toc='pot-energy')
 
-        if properties == ['forces']:
-            if self.model.__class__.__name__ != 'KernelRidge':
-                log('Calculating forces...', tic='forces')
-                self.descriptor.calculate_fingerprints(
-                        images=images,
-                        log=log,
-                        calculate_derivatives=True
-                        )
-                forces = \
-                    self.model.calculate_forces(
-                        self.descriptor.fingerprints[key],
-                        self.descriptor.fingerprintprimes[key])
-                self.results['forces'] = forces
-                log('...forces calculated.', toc='forces')
+        if properties == ['energies']:  ## ssrokyz start
+            log('Getting atomic potentails...', tic='pot-energies')
+            self.results['energies'] = self.model.get_atomic_energies()
+            log('...atomic potentials calculated.', toc = 'pot-energies') ## ssrokyz end
 
-            else:
-                log('Calculating forces...', tic='forces')
-                self.descriptor.calculate_fingerprints(
-                        images=images,
-                        log=log,
-                        calculate_derivatives=True
-                        )
-                log('Loading the training set')
-                if isinstance(self.model.trainingimages, str):
-                    trainingimages = hash_images(
-                            ase.io.Trajectory(self.model.trainingimages)
-                            )
-                else:
-                    trainingimages = hash_images(self.model.trainingimages)
-                self.descriptor.calculate_fingerprints(
-                        images=trainingimages,
-                        log=log,
-                        calculate_derivatives=True
-                        )
-                t_descriptor = self.descriptor
-                forces = \
-                    self.model.calculate_forces(
-                        self.descriptor.fingerprints[key],
-                        self.descriptor.fingerprintprimes[key],
-                        hash=key,
-                        trainingimages=trainingimages,
-                        t_descriptor=t_descriptor,
-                        )
-                self.results['forces'] = forces
-                log('...forces calculated.', toc='forces')
+        if properties == ['forces']:
+            log('Calculating forces...', tic='forces')
+            self.descriptor.calculate_fingerprints(images=images,
+                                                   log=log,
+                                                   calculate_derivatives=True)
+            forces = \
+                self.model.calculate_forces(
+                    self.descriptor.fingerprints[key],
+                    self.descriptor.fingerprintprimes[key])
+            self.results['forces'] = forces
+            log('...forces calculated.', toc='forces')
 
     def train(self,
               images,
@@ -374,7 +326,6 @@ class Amp(Calculator, object):
         if result is True:
             log('Amp successfully trained. Saving current parameters.')
             filename = self.label + '.amp'
-            self.reset()  # Clears any calculation results.
         else:
             log('Amp not trained successfully. Saving current parameters.')
             filename = make_filename(self.label, '-untrained-parameters.amp')
@@ -429,7 +380,7 @@ class Amp(Calculator, object):
         log('Brown University.')
         log('PI Website: http://brown.edu/go/catalyst')
         log('Official repository: http://bitbucket.org/andrewpeterson/amp')
-        log('Official documentation: http://amp.readthedocs.io/')
+        log('Official documentation: http://amp.readthedocs.org/')
         log('Citation:')
         log('  Alireza Khorshidi & Andrew A. Peterson,')
         log('  Computer Physics Communications 207: 310-324 (2016).')
@@ -445,8 +396,8 @@ class Amp(Calculator, object):
         ampdirectory = os.path.dirname(os.path.abspath(__file__))
         log('Amp directory: %s' % ampdirectory)
         commithash, commitdate = get_git_commit(ampdirectory)
-        log(' Last commit: {:s}'.format(commithash))
-        log(' Last commit date: {:s}'.format(commitdate))
+        log(' Last commit: %s' % commithash)
+        log(' Last commit date: %s' % commitdate)
         log('Python: v{0}.{1}.{2}: %s'.format(*sys.version_info[:3]) %
             sys.executable)
         log('ASE v%s: %s' % (aseversion, os.path.dirname(ase.__file__)))
@@ -459,7 +410,7 @@ class Amp(Calculator, object):
                 (scipy.version.version, os.path.dirname(scipy.__file__)))
         except ImportError:
             log('SciPy: not available')
-        # ZMQ and pxssh are only necessary for parallel calculations.
+        # ZMQ an pxssh are only necessary for parallel calculations.
         try:
             import zmq
             log('ZMQ/PyZMQ v%s/v%s: %s' %
@@ -492,19 +443,17 @@ def importhelper(importname):
     is silly.
     """
     if importname == '.descriptor.gaussian.Gaussian':
-        from .descriptor.gaussian import Gaussian as Imported
+        from .descriptor.gaussian import Gaussian as Module
     elif importname == '.descriptor.zernike.Zernike':
-        from .descriptor.zernike import Zernike as Imported
+        from .descriptor.zernike import Zernike as Module
     elif importname == '.descriptor.bispectrum.Bispectrum':
-        from .descriptor.bispectrum import Bispectrum as Imported
+        from .descriptor.bispectrum import Bispectrum as Module
     elif importname == '.model.neuralnetwork.NeuralNetwork':
-        from .model.neuralnetwork import NeuralNetwork as Imported
+        from .model.neuralnetwork import NeuralNetwork as Module
     elif importname == '.model.neuralnetwork.tflow':
-        from .model.tflow import NeuralNetwork as Imported
-    elif importname == '.model.kernelridge.KernelRidge':
-        from .model.kernelridge import KernelRidge as Imported
+        from .model.tflow import NeuralNetwork as Module
     elif importname == '.model.LossFunction':
-        from .model import LossFunction as Imported
+        from .model import LossFunction as Module
     else:
         raise NotImplementedError(
             'Attempt to import the module %s. Was this intended? '
@@ -513,7 +462,7 @@ def importhelper(importname):
             'module can be added to amp.importhelper.' %
             importname)
 
-    return Imported
+    return Module
 
 
 def get_git_commit(ampdirectory):
@@ -528,8 +477,7 @@ def get_git_commit(ampdirectory):
                                              stderr=devnull)
     except:
         output = b'unknown hash\tunknown date'
-    output = output.decode('utf-8')
     output = output.strip()
-    commithash, commitdate = output.split('\t')
+    commithash, commitdate = output.split(b'\t')
     os.chdir(pwd)
     return commithash, commitdate

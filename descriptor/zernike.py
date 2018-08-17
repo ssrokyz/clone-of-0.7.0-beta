@@ -26,13 +26,10 @@ class Zernike(object):
         interactions are ignored; in this case a cosine cutoff function will be
         employed.  Default is a 6.5-Angstrom cosine cutoff.
     Gs : dict
-        Dictionary containing coefficients of atomic density function.
-        These are typically taken as the atomic numbers; this is what
-        is used when auto-generated. Otherwise, they can be supplied in
-        the following form, for example:
+        Dictionary of symbols and dictionaries for making symmetry functions.
+        Either auto-genetrated, or given in the following form, for example:
 
                >>> Gs = {"Au": {"Au": 3., "O": 2.}, "O": {"Au": 5., "O": 10.}}
-
         This is basically the same as \eta in Eq. (16) of
         https://doi.org/10.1016/j.cpc.2016.05.010.
 
@@ -40,13 +37,6 @@ class Zernike(object):
         Maximum degree of Zernike polynomials that will be included in the
         fingerprint vector. Can be different values for different species fed
         as a dictionary with chemical elements as keys.
-        The length of the fingerprint vector is quadratically proportional to
-        nmax:
-        If nmax is even, then the length of fingerprint vector is
-        nmax + (nmax / 2)^2 + 1.
-        If nmax is odd, then the length of fingerprint vector is
-        nmax + (nmax^2 - 1) / 4 + 1,
-        regardless of how many chemical species exist.
     dblabel : str
         Optional separate prefix/location for database files, including
         fingerprints, fingerprint derivatives, and neighborlists. This file
@@ -1012,6 +1002,4 @@ if __name__ == "__main__":
         socket.recv_string()  # Needed to complete REQ/REP.
 
     else:
-        socket.close()  # May be needed in python3 / ZMQ.
         raise NotImplementedError('purpose %s unknown.' % purpose)
-    socket.close()  # May be needed in python3 / ZMQ.

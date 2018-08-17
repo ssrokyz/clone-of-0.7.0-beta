@@ -32,17 +32,14 @@ log = Logger(file=sys.stderr)
 context = zmq.Context()
 socket = context.socket(zmq.REQ)
 socket.connect('tcp://%s' % hostsocket)
-socket.send_pyobj(msg('purpose'))
+socket.send_pyobj(msg('<purpose>'))
 purpose = socket.recv_string()
 
 if purpose == 'calculate_loss_function':
-    # Parameters will be sent via a publisher socket; get address.
-    socket.send_pyobj(msg('request', 'publisher'))
-    publisher_address = socket.recv_pyobj()
     # Request variables.
-    socket.send_pyobj(msg('request', 'fortran'))
+    socket.send_pyobj(msg('<request>', 'fortran'))
     fortran = socket.recv_pyobj()
-    socket.send_pyobj(msg('request', 'modelstring'))
+    socket.send_pyobj(msg('<request>', 'modelstring'))
     modelstring = socket.recv_pyobj()
     dictionary = string2dict(modelstring)
     Model = importhelper(dictionary.pop('importname'))
@@ -52,10 +49,10 @@ if purpose == 'calculate_loss_function':
     model.log = log
     log('Model set up.')
 
-    socket.send_pyobj(msg('request', 'args'))
+    socket.send_pyobj(msg('<request>', 'args'))
     args = socket.recv_pyobj()
     d = args['d']
-    socket.send_pyobj(msg('request', 'lossfunctionstring'))
+    socket.send_pyobj(msg('<request>', 'lossfunctionstring'))
     lossfunctionstring = socket.recv_pyobj()
     dictionary = string2dict(lossfunctionstring)
     log(str(dictionary))
@@ -65,74 +62,58 @@ if purpose == 'calculate_loss_function':
                                 d=d, **dictionary)
     log('Loss function set up.')
 
-    socket.send_pyobj(msg('request', 'images'))
+    images = None
+    socket.send_pyobj(msg('<request>', 'images'))
     images = socket.recv_pyobj()
     log('Images received.')
 
     fingerprints = None
-    socket.send_pyobj(msg('request', 'fingerprints'))
+    socket.send_pyobj(msg('<request>', 'fingerprints'))
     fingerprints = socket.recv_pyobj()
     log('Fingerprints received.')
 
     fingerprintprimes = None
-    socket.send_pyobj(msg('request', 'fingerprintprimes'))
+    socket.send_pyobj(msg('<request>', 'fingerprintprimes'))
     fingerprintprimes = socket.recv_pyobj()
     log('Fingerprintprimes received.')
 
     # Set up local loss function.
-    model.lossfunction = lossfunction
     lossfunction.attach_model(model,
                               fingerprints=fingerprints,
                               fingerprintprimes=fingerprintprimes,
                               images=images)
     log('Images, fingerprints, and fingerprintprimes '
         'attached to the loss function.')
-    socket.send_pyobj(msg('request', 'args'))
-    args = socket.recv_pyobj()
 
     if model.fortran:
-        log('Fortran will be used to evaluate loss function.')
+        log('fmodules will be used to evaluate loss function.')
     else:
         log('Fortran will not be used to evaluate loss function.')
     # Now wait for parameters, and send the component of the loss function.
-    socket.send_pyobj(msg('setup complete'))
-    socket.recv_pyobj()
-
-    log('Establishing subscriber at {}.'.format(publisher_address))
-    subscriber = context.socket(zmq.SUB)
-    subscriber.connect('tcp://%s' % publisher_address)
-    subscriber.setsockopt(zmq.SUBSCRIBE, b'')
-    log('Subscriber established.')
-
-    test_message = subscriber.recv_pyobj()
-    log('Received a test message. Checking.')
-    if test_message == 'test message':
-        log('Correct; sending response.')
-        socket.send_pyobj(msg('subscriber working'))
-        socket.recv_pyobj()
-    else:
-        raise RuntimeError()
-
     while True:
-        # Drain any test messages from the broadcast.
-        test_message = subscriber.recv_pyobj()
-        if test_message == 'done':
-            break
-
-    while True:
-        parameters = subscriber.recv_pyobj()
+        socket.send_pyobj(msg('<request>', 'parameters'))
+        parameters = socket.recv_pyobj()
         if parameters == '<stop>':
             # FIXME/ap: I removed an fmodules.deallocate_variables() call
             # here. Do we need to add this to LossFunction?
             break
-        output = lossfunction.get_loss(parameters,
-                                       lossprime=args['lossprime'])
+        elif parameters == '<continue>':
+            # Master is waiting for other workers to finish.
+            # Any more elegant way
+            # to do this without opening another comm channel?
+            # or having a thread for each process?
+            pass
+        else:
+            # FIXME/ap: Why do we need to request this every time?
+            # Couldn't it be part of earlier request?
+            socket.send_pyobj(msg('<request>', 'args'))
+            args = socket.recv_pyobj()
+            lossprime = args['lossprime']
+            output = lossfunction.get_loss(parameters,
+                                           lossprime=lossprime)
 
-        socket.send_pyobj(msg('result', output))
-        socket.recv_pyobj()
-
-    socket.close()  # May be needed in python3 / ZMQ.
-    subscriber.close()
+            socket.send_pyobj(msg('<result>', output))
+            socket.recv_string()
 
 else:
     raise NotImplementedError('Purpose "%s" unknown.' % purpose)

@@ -1,5 +1,5 @@
 import numpy as np
-from numpy import sqrt, exp
+from numpy import cos, sqrt, exp
 from ase.data import atomic_numbers
 from ase.calculators.calculator import Parameters
 from ..utilities import Data, Logger, importer
@@ -295,7 +295,7 @@ class FingerprintCalculator:
         if cutoff['name'] == 'Cosine':
             cutoff_fxn = Cosine(Rc)
         elif cutoff['name'] == 'Polynomial':
-            # cutoff_fxn = Polynomial(cutoff)
+#            cutoff_fxn = Polynomial(cutoff)
             raise NotImplementedError()
 
         rs = []
@@ -398,7 +398,7 @@ def calculate_c(j, mp, m, G_element, cutoff, cutofffn, factorial, n_symbols,
     if cutofffn is 'Cosine':
         cutoff_fxn = Cosine(cutoff)
     elif cutofffn is 'Polynomial':
-        # cutoff_fxn = Polynomial(cutoff)
+#        cutoff_fxn = Polynomial(cutoff)
         raise NotImplementedError
 
     value = 0.
@@ -680,6 +680,4 @@ if __name__ == "__main__":
         socket.recv_string()  # Needed to complete REQ/REP.
 
     else:
-        socket.close()  # May be needed in python3 / ZMQ.
         raise NotImplementedError('purpose %s unknown.' % purpose)
-    socket.close()  # May be needed in python3 / ZMQ.

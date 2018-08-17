@@ -2,6 +2,7 @@ from ..utilities import ConvergenceOccurred
 
 
 class Regressor:
+
     """Class to manage the regression of a generic model. That is, for a
     given parameter set, calculates the cost function (the difference in
     predicted energies and actual energies across training images), then
@@ -27,55 +28,33 @@ class Regressor:
         """optimizer can be specified; it should behave like a
         scipy.optimize optimizer. That is, it should take as its first two
         arguments the function to be optimized and the initial guess of the
-        optimal parameters. Additional keyword arguments can be fed through
+        optimal paramters. Additional keyword arguments can be fed through
         the optimizer_kwargs dictionary."""
 
         user_kwargs = optimizer_kwargs
         optimizer_kwargs = {}
         if optimizer == 'BFGS':
-            from scipy.optimize import minimize as optimizer
-            optimizer_kwargs = {
-                                'method' : 'BFGS', 
-                                'options': {'gtol': 1e-15, }
-                               }
-            #optimizer_kwargs = {'method':'BFGS', 'gtol': 1e-15, }
+            from scipy.optimize import fmin_bfgs as optimizer
+            optimizer_kwargs = {'gtol': 1e-15, }
         elif optimizer == 'L-BFGS-B':
-            from scipy.optimize import minimize as optimizer
-            optimizer_kwargs = {
-                                'method': 'L-BFGS-B',
-                                'options': {'ftol': 1e-05,
-                                            'gtol': 1e-08,
-                                            'maxfun': 1000000,
-                                            'maxiter': 1000000}
-                               }
+            from scipy.optimize import fmin_l_bfgs_b as optimizer
+            optimizer_kwargs = {'factr': 1e+02,
+                                'pgtol': 1e-08,
+                                'maxfun': 1000000,
+                                'maxiter': 1000000}
             import scipy
             from distutils.version import StrictVersion
             if StrictVersion(scipy.__version__) >= StrictVersion('0.17.0'):
-                optimizer_kwargs['options']['maxls'] = 2000
+                optimizer_kwargs['maxls'] = 2000
         elif optimizer == 'TNC':
-            from scipy.optimize import minimize as optimizer
-            optimizer_kwargs = {
-                                'method': 'TNC',
-                                'options': {'ftol': 0.,
-                                            'xtol': 0.,
-                                            'gtol': 1e-08,
-                                            'maxiter': 1000000, }
-                               }
-        elif optimizer == 'Newton-CG':
-            from scipy.optimize import minimize as optimizer
-            optimizer_kwargs = {
-                                'method': 'Newton-CG', 
-                                'options': {'xtol': 1e-15, }
-                               }
-
-        elif optimizer == 'Nelder-Mead':
-            from scipy.optimize import minimize as optimizer
-            optimizer_kwargs = {
-                                'method': 'Nelder-Mead',
-                                'options': {'maxfun': 99999999,
-                                            'maxiter': 99999999, }
-                               }
-            lossprime = False
+            from scipy.optimize import fmin_tnc as optimizer
+            optimizer_kwargs = {'ftol': 0.,
+                                'xtol': 0.,
+                                'pgtol': 1e-08,
+                                'maxfun': 1000000, }
+        elif optimizer == 'NCG':
+            from scipy.optimize import fmin_ncg as optimizer
+            optimizer_kwargs = {'avextol': 1e-15, }
 
         if user_kwargs:
             optimizer_kwargs.update(user_kwargs)
@@ -96,14 +75,16 @@ class Regressor:
         log : str
             Name of script to log progress.
         """
-        self.optimizer_kwargs.update({'jac': self.lossprime,
-                                        'args': (self.lossprime,)})
         log('Starting parameter optimization.', tic='opt')
         log(' Optimizer: %s' % self.optimizer)
         log(' Optimizer kwargs: %s' % self.optimizer_kwargs)
         x0 = model.vector.copy()
         try:
-            self.optimizer(model.get_loss, x0, **self.optimizer_kwargs)
+            if self.lossprime:
+                self.optimizer(model.get_loss, x0, model.get_lossprime,
+                               **self.optimizer_kwargs)
+            else:
+                self.optimizer(model.get_loss, x0, **self.optimizer_kwargs)
 
         except ConvergenceOccurred:
             log('...optimization successful.', toc='opt')

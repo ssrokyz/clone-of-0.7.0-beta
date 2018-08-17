@@ -333,6 +333,4 @@ if __name__ == "__main__":
         socket.recv_string()  # Needed to complete REQ/REP.
 
     else:
-        socket.close()  # May be needed in python3 / ZMQ.
         raise NotImplementedError('purpose %s unknown.' % purpose)
-    socket.close()  # May be needed in python3 / ZMQ.

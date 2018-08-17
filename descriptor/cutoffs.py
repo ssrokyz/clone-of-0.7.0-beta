@@ -56,7 +56,7 @@ class Cosine(object):
             return 0.5 * (np.cos(np.pi * Rij / self.Rc) + 1.)
 
     def prime(self, Rij):
-        """Derivative (dfc_dRij) of the Cosine cutoff function with respect to Rij.
+        """Derivative of the Cosine cutoff function.
 
         Parameters
         ----------
@@ -117,7 +117,7 @@ class Polynomial(object):
             return value
 
     def prime(self, Rij):
-        """Derivative (dfc_dRij) of the Polynomial cutoff function with respect to Rij.
+        """Derivative of the Polynomial cutoff function.
 
         Parameters
         ----------

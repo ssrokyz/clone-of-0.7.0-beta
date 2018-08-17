@@ -1,5 +1,4 @@
 import numpy as np
-from copy import deepcopy
 
 from ase.data import atomic_numbers
 from ase.calculators.calculator import Parameters
@@ -22,7 +21,7 @@ class Gaussian(object):
         fed as a float representing the radius above which neighbor
         interactions are ignored; in this case a cosine cutoff function will be
         employed.  Default is a 6.5-Angstrom cosine cutoff.
-    Gs : dict or list
+    Gs : dict
         Dictionary of symbols and lists of dictionaries for making symmetry
         functions. Either auto-genetrated, or given in the following form, for
         example:
@@ -34,10 +33,6 @@ class Gaussian(object):
                ...              {"type":"G4", "elements":["O", "Au"],
                ...               "eta":2., "gamma":1., "zeta":5.0}]}
 
-        You can use amp.model.gaussian.make_symmetry_functions to help create
-        these lists of dictionaries.  If you supply a list instead of a
-        dictionary, it will assume you want identical symmetry functions for
-        each element.
     dblabel : str
         Optional separate prefix/location for database files, including
         fingerprints, fingerprint derivatives, and neighborlists. This file
@@ -153,10 +148,6 @@ class Gaussian(object):
         if p.Gs is None:
             log('No symmetry functions supplied; creating defaults.')
             p.Gs = make_default_symmetry_functions(p.elements)
-        elif not hasattr(p.Gs, 'keys'):
-            log('List of symmetry functions supplied; assumed identical for '
-                'each element.')
-            p.Gs = {element: deepcopy(p.Gs) for element in p.elements}
         log('Number of symmetry functions for each element:')
         for _ in p.Gs.keys():
             log(' %2s: %i' % (_, len(p.Gs[_])))
@@ -167,11 +158,6 @@ class Gaussian(object):
                     log(' {}: {}, {}, eta = {}'
                         .format(index, fp['type'], fp['element'], fp['eta']))
                 elif fp['type'] == 'G4':
-                    log(' {}: {}, ({}, {}), eta={}, gamma={}, zeta={}'
-                        .format(index, fp['type'], fp['elements'][0],
-                                fp['elements'][1], fp['eta'], fp['gamma'],
-                                fp['zeta']))
-                elif fp['type'] == 'G5':
                     log(' {}: {}, ({}, {}), eta={}, gamma={}, zeta={}'
                         .format(index, fp['type'], fp['elements'][0],
                                 fp['elements'][1], fp['eta'], fp['gamma'],
@@ -360,11 +346,6 @@ class FingerprintCalculator:
                                      G['elements'], G['gamma'],
                                      G['zeta'], G['eta'], self.globals.cutoff,
                                      Ri, self.fortran)
-            elif G['type'] == 'G5':
-                ridge = calculate_G5(neighborsymbols, neighborpositions,
-                                     G['elements'], G['gamma'],
-                                     G['zeta'], G['eta'], self.globals.cutoff,
-                                     Ri, self.fortran)
             else:
                 raise NotImplementedError('Unknown G type: %s' % G['type'])
             fingerprint[count] = ridge
@@ -533,21 +514,6 @@ class FingerprintPrimeCalculator:
                     self.fortran)
             elif G['type'] == 'G4':
                 ridge = calculate_G4_prime(
-                    neighborindices,
-                    neighborsymbols,
-                    neighborpositions,
-                    G['elements'],
-                    G['gamma'],
-                    G['zeta'],
-                    G['eta'],
-                    self.globals.cutoff,
-                    index,
-                    Rindex,
-                    m,
-                    l,
-                    self.fortran)
-            elif G['type'] == 'G5':
-                ridge = calculate_G5_prime(
                     neighborindices,
                     neighborsymbols,
                     neighborpositions,
@@ -747,108 +713,6 @@ def calculate_G4(neighborsymbols, neighborpositions,
         return ridge
 
 
-def calculate_G5(neighborsymbols, neighborpositions,
-                 G_elements, gamma, zeta, eta, cutoff,
-                 Ri, fortran):
-    """Calculate G5 symmetry function.
-
-    Ideally this will not be used but will be a template for how to build the
-    fortran version (and serves as a slow backup if the fortran one goes
-    uncompiled). In G5, the Gaussians and cutoff functions with respect to
-    R_ijk are omitted. This symmetry function is more useful for larger atomic
-    separations, and useful for angular configurations in which R_jk is larger
-    than Rc but still inside the cutoff radius e.g. triplets of 180 degrees.
-
-    For more information see: J. Behler, Int. J. Quantum Chem. 115, 1032
-    (2015).
-
-    Parameters
-    ----------
-    neighborsymbols : list of str
-        List of symbols of neighboring atoms.
-    neighborpositions : list of list of floats
-        List of Cartesian atomic positions of neighboring atoms.
-    G_elements : list of str
-        A list of two members, each member is the chemical species of one of
-        the neighboring atoms forming the triangle with the center atom.
-    gamma : float
-        Parameter of Gaussian symmetry functions.
-    zeta : float
-        Parameter of Gaussian symmetry functions.
-    eta : float
-        Parameter of Gaussian symmetry functions.
-    cutoff : dict
-        Cutoff function, typically from amp.descriptor.cutoffs. Should be also
-        formatted as a dictionary by todict method, e.g.
-        cutoff=Cosine(6.5).todict()
-    Ri : list
-        Position of the center atom. Should be fed as a list of three floats.
-    fortran : bool
-        If True, will use the fortran subroutines, else will not.
-
-    Returns
-    -------
-    ridge : float
-        G5 fingerprint.
-    """
-    if fortran:  # fortran version; faster
-        G_numbers = sorted([atomic_numbers[el] for el in G_elements])
-        neighbornumbers = \
-            [atomic_numbers[symbol] for symbol in neighborsymbols]
-        if len(neighborpositions) == 0:
-            return 0.
-        else:
-            cutofffn = cutoff['name']
-            Rc = cutoff['kwargs']['Rc']
-
-            args_calculate_g5 = dict(
-                    neighbornumbers=neighbornumbers,
-                    neighborpositions=neighborpositions,
-                    g_numbers=G_numbers,
-                    g_gamma=gamma,
-                    g_zeta=zeta,
-                    g_eta=eta,
-                    rc=Rc,
-                    cutofffn=cutofffn,
-                    ri=Ri
-                    )
-            if cutofffn == 'Polynomial':
-                args_calculate_g5['p_gamma'] = cutoff['kwargs']['gamma']
-
-            ridge = fmodules.calculate_g5(**args_calculate_g5)
-            return ridge
-    else:
-        Rc = cutoff['kwargs']['Rc']
-        cutoff_fxn = dict2cutoff(cutoff)
-        ridge = 0.
-        counts = range(len(neighborpositions))
-        for j in counts:
-            for k in counts[(j + 1):]:
-                els = sorted([neighborsymbols[j], neighborsymbols[k]])
-                if els != G_elements:
-                    continue
-                Rij_vector = neighborpositions[j] - Ri
-                Rij = np.linalg.norm(Rij_vector)
-                Rik_vector = neighborpositions[k] - Ri
-                Rik = np.linalg.norm(Rik_vector)
-                cos_theta_ijk = np.dot(Rij_vector, Rik_vector) / Rij / Rik
-                term = (1. + gamma * cos_theta_ijk) ** zeta
-                term *= np.exp(-eta * (Rij ** 2. + Rik ** 2.) /
-                               (Rc ** 2.))
-                _Rij = dict(Rij=Rij)
-                _Rik = dict(Rij=Rik)
-
-                if cutoff['name'] == 'Polynomial':
-                    _Rij['gamma'] = cutoff['kwargs']['gamma']
-                    _Rik['gamma'] = cutoff['kwargs']['gamma']
-
-                term *= cutoff_fxn(**_Rij)
-                term *= cutoff_fxn(**_Rik)
-                ridge += term
-        ridge *= 2. ** (1. - zeta)
-        return ridge
-
-
 def make_symmetry_functions(elements, type, etas, zetas=None, gammas=None):
     """Helper function to create Gaussian symmetry functions.
     Returns a list of dictionaries with symmetry function parameters
@@ -860,13 +724,13 @@ def make_symmetry_functions(elements, type, etas, zetas=None, gammas=None):
         List of element types. The first in the list is considered the
         central element for this fingerprint. #FIXME: Does that matter?
     type : str
-        Either G2, G4, or G5.
+        Either G2 or G4.
     etas : list of floats
-        eta values to use in G2, G4 or G5 fingerprints
+        eta values to use in G2 or G4 fingerprints
     zetas : list of floats
-        zeta values to use in G4, and G5 fingerprints
+        zeta values to use in G4 fingerprints
     gammas : list of floats
-        gamma values to use in G4, and G5 fingerprints
+        gamma values to use in G4 fingerprints
 
     Returns
     -------
@@ -893,25 +757,11 @@ def make_symmetry_functions(elements, type, etas, zetas=None, gammas=None):
                                       'gamma': gamma,
                                       'zeta': zeta})
         return G
-    elif type == 'G5':
-        G = []
-        for eta in etas:
-            for zeta in zetas:
-                for gamma in gammas:
-                    for i1, el1 in enumerate(elements):
-                        for el2 in elements[i1:]:
-                            els = sorted([el1, el2])
-                            G.append({'type': 'G5',
-                                      'elements': els,
-                                      'eta': eta,
-                                      'gamma': gamma,
-                                      'zeta': zeta})
-        return G
     raise NotImplementedError('Unknown type: {}.'.format(type))
 
 
 def make_default_symmetry_functions(elements):
-    """Makes default set of G2 and G4 symmetry functions.
+    """Makes symmetry functions as in Nano Letters 14:2670, 2014.
 
 
     Parameters
@@ -926,13 +776,29 @@ def make_default_symmetry_functions(elements):
     """
     G = {}
     for element0 in elements:
+
         # Radial symmetry functions.
-        etas = np.logspace(np.log10(0.05), np.log10(5.), num=4)
-        _G = make_symmetry_functions(type='G2', etas=etas, elements=elements)
+        etas = [0.05, 4., 20., 80.]
+        _G = [{'type': 'G2', 'element': element, 'eta': eta}
+              for eta in etas
+              for element in elements]
+
         # Angular symmetry functions.
-        _G += make_symmetry_functions(type='G4', etas=[0.005],
-                                      zetas=[1., 4.], gammas=[+1., -1.],
-                                      elements=elements)
+        etas = [0.005]
+        zetas = [1., 4.]
+        gammas = [+1., -1.]
+        for eta in etas:
+            for zeta in zetas:
+                for gamma in gammas:
+                    for i1, el1 in enumerate(elements):
+                        for el2 in elements[i1:]:
+                            els = sorted([el1, el2])
+                            _G.append({'type': 'G4',
+                                       'elements': els,
+                                       'eta': eta,
+                                       'gamma': gamma,
+                                       'zeta': zeta})
+
         G[element0] = _G
     return G
 
@@ -1331,144 +1197,6 @@ def calculate_G4_prime(neighborindices, neighborsymbols, neighborpositions,
 
     return ridge
 
-
-def calculate_G5_prime(neighborindices, neighborsymbols, neighborpositions,
-                       G_elements, gamma, zeta, eta,
-                       cutoff, i, Ri, m, l, fortran):
-    """Calculates coordinate derivative of G5 symmetry function for atom at
-    index i and position Ri with respect to coordinate x_{l} of atom index m.
-
-    See Eq. 13d of the supplementary information of Khorshidi, Peterson,
-    CPC(2016).
-
-    Parameters
-    ----------
-    neighborindices : list of int
-        List of int of neighboring atoms.
-    neighborsymbols : list of str
-        List of symbols of neighboring atoms.
-    neighborpositions : list of list of float
-        List of Cartesian atomic positions of neighboring atoms.
-    G_elements : list of str
-        A list of two members, each member is the chemical species of one of
-        the neighboring atoms forming the triangle with the center atom.
-    gamma : float
-        Parameter of Behler symmetry functions.
-    zeta : float
-        Parameter of Behler symmetry functions.
-    eta : float
-        Parameter of Behler symmetry functions.
-    cutoff : dict
-        Cutoff function, typically from amp.descriptor.cutoffs. Should be also
-        formatted as a dictionary by todict method, e.g.
-        cutoff=Cosine(6.5).todict()
-    i : int
-        Index of the center atom.
-    Ri : list
-        Position of the center atom. Should be fed as a list of three floats.
-    m : int
-        Index of the atom force is acting on.
-    l : int
-        Direction of force.
-    fortran : bool
-        If True, will use the fortran subroutines, else will not.
-
-    Returns
-    -------
-    ridge : float
-        Coordinate derivative of G5 symmetry function for atom at index i and
-        position Ri with respect to coordinate x_{l} of atom index m.
-    """
-    if fortran:  # fortran version; faster
-        G_numbers = sorted([atomic_numbers[el] for el in G_elements])
-        neighbornumbers = [atomic_numbers[symbol]
-                           for symbol in neighborsymbols]
-        if len(neighborpositions) == 0:
-            ridge = 0.
-        else:
-            cutofffn = cutoff['name']
-            Rc = cutoff['kwargs']['Rc']
-
-            args_calculate_g5_prime = dict(
-                    neighborindices=list(neighborindices),
-                    neighbornumbers=neighbornumbers,
-                    neighborpositions=neighborpositions,
-                    g_numbers=G_numbers,
-                    g_gamma=gamma,
-                    g_zeta=zeta,
-                    g_eta=eta,
-                    rc=Rc,
-                    cutofffn=cutofffn,
-                    i=i,
-                    ri=Ri,
-                    m=m,
-                    l=l
-                    )
-            if cutofffn == 'Polynomial':
-                args_calculate_g5_prime['p_gamma'] = cutoff['kwargs']['gamma']
-
-            ridge = fmodules.calculate_g5_prime(**args_calculate_g5_prime)
-    else:
-        Rc = cutoff['kwargs']['Rc']
-        cutoff_fxn = dict2cutoff(cutoff)
-        ridge = 0.
-        # number of neighboring atoms
-        counts = range(len(neighborpositions))
-        for j in counts:
-            for k in counts[(j + 1):]:
-                els = sorted([neighborsymbols[j], neighborsymbols[k]])
-                if els != G_elements:
-                    continue
-                Rj = neighborpositions[j]
-                Rk = neighborpositions[k]
-                Rij_vector = neighborpositions[j] - Ri
-                Rij = np.linalg.norm(Rij_vector)
-                Rik_vector = neighborpositions[k] - Ri
-                Rik = np.linalg.norm(Rik_vector)
-                cos_theta_ijk = np.dot(Rij_vector, Rik_vector) / Rij / Rik
-                c1 = (1. + gamma * cos_theta_ijk)
-
-                _Rij = dict(Rij=Rij)
-                _Rik = dict(Rij=Rik)
-                if cutoff['name'] == 'Polynomial':
-                    _Rij['gamma'] = cutoff['kwargs']['gamma']
-                    _Rik['gamma'] = cutoff['kwargs']['gamma']
-
-                fcRij = cutoff_fxn(**_Rij)
-                fcRik = cutoff_fxn(**_Rik)
-                if zeta == 1:
-                    term1 = \
-                        np.exp(- eta * (Rij ** 2. + Rik ** 2.) /
-                               (Rc ** 2.))
-                else:
-                    term1 = c1 ** (zeta - 1.) * \
-                        np.exp(- eta * (Rij ** 2. + Rik ** 2.) /
-                               (Rc ** 2.))
-                term2 = 0.
-                fcRijfcRik = fcRij * fcRik
-                dCosthetadRml = dCos_theta_ijk_dR_ml(i,
-                                                     neighborindices[j],
-                                                     neighborindices[k],
-                                                     Ri, Rj,
-                                                     Rk, m, l)
-                if dCosthetadRml != 0:
-                    term2 += gamma * zeta * dCosthetadRml
-                dRijdRml = dRij_dRml(i, neighborindices[j], Ri, Rj, m, l)
-                if dRijdRml != 0:
-                    term2 += -2. * c1 * eta * Rij * dRijdRml / (Rc ** 2.)
-                dRikdRml = dRij_dRml(i, neighborindices[k], Ri, Rk, m, l)
-                if dRikdRml != 0:
-                    term2 += -2. * c1 * eta * Rik * dRikdRml / (Rc ** 2.)
-                term3 = fcRijfcRik * term2
-                term4 = cutoff_fxn.prime(**_Rij) * dRijdRml * fcRik
-                term5 = fcRij * cutoff_fxn.prime(**_Rik) * dRikdRml
-
-                ridge += term1 * (term3 + c1 * (term4 + term5))
-        ridge *= 2. ** (1. - zeta)
-
-    return ridge
-
-
 if __name__ == "__main__":
     """Directly calling this module; apparently from another node.
 
@@ -1589,6 +1317,4 @@ if __name__ == "__main__":
         socket.recv_string()  # Needed to complete REQ/REP.
 
     else:
-        socket.close()  # May be needed in python3 / ZMQ.
         raise NotImplementedError('purpose %s unknown.' % purpose)
-    socket.close()  # May be needed in python3 / ZMQ.

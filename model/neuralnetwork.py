@@ -1,16 +1,15 @@
 import os
 import numpy as np
 from collections import OrderedDict
-from scipy.optimize import fmin
 from ase.calculators.calculator import Parameters
 
 from . import LossFunction, calculate_fingerprints_range, Model
 from ..regression import Regressor
 from ..utilities import Logger, hash_images, make_filename
-from .. import Amp
 
 
 class NeuralNetwork(Model):
+
     """Class that implements a basic feed-forward neural network.
 
     Parameters
@@ -45,20 +44,20 @@ class NeuralNetwork(Model):
         function, "tanh" refers to tanh function, and "sigmoid" refers to
         sigmoid function.
     weights : dict
-        In the atom-centered mode, keys correspond to chemical elements and
-        values are dictionaries with layer keys and network weight two
-        dimensional arrays as values. Arrays are set up to connect node i in
-        the previous layer with node j in the current layer with indices
-        w[i,j]. The last value for index i corresponds to bias.  In the case of
-        no descriptor, keys correspond to layers and values are two dimensional
-        arrays of network weight.  If weights is not given, arrays will be
-        randomly generated.
+        In the case of no descriptor, keys correspond to layers and values are
+        two dimensional arrays of network weight.  In the atom-centered mode,
+        keys correspond to chemical elements and values are dictionaries with
+        layer keys and network weight two dimensional arrays as values. Arrays
+        are set up to connect node i in the previous layer with node j in the
+        current layer with indices w[i,j]. The last value for index i
+        corresponds to bias. If weights is not given, arrays will be randomly
+        generated.
     scalings : dict
         In the case of no descriptor, keys are "intercept" and "slope" and
         values are real numbers. In the fingerprinting scheme, keys correspond
         to chemical elements and values are dictionaries with "intercept" and
-        "slope" keys and real number values. If scalings is None, it will
-        be guessed based on the input range of energies.
+        "slope" keys and real number values. If scalings is not given, it will
+        be randomly generated.
     fprange : dict
         Range of fingerprints of each chemical species.  Should be fed as
         a dictionary of chemical species and a list of minimum and maximun,
@@ -66,36 +65,22 @@ class NeuralNetwork(Model):
 
         >>> fprange={"Pd": [0.31, 0.59], "O":[0.56, 0.72]}
 
-    mode : str
-        Can be either 'atom-centered' or 'image-centered'.
-    version : object
-        Version of this class.
     regressor : object
         Regressor object for finding best fit model parameters, e.g. by loss
         function optimization via amp.regression.Regressor.
+    mode : str
+        Can be either 'atom-centered' or 'image-centered'.
     lossfunction : object
-        Loss function object.
-    prescale : bool
-        If True, will start with a simple single-parameter (per element)
-        regression to find the best-fit values for the scaling parameters. This
-        portion of the code is not parallelized, but can greatly improve the
-        likelihood of and path to convergence, as this is the most sensitive
-        parameter.  Ignored if scalings are explicitly supplied.
+        Loss function object, if at all desired by the user.
+    version : object
+        Version of this class.
     fortran : bool
-        Can optionally shut off fortran, primarily for debugging.
+        If True, allows for extrapolation, if False, does not allow.
     checkpoints : int
         Frequency with which to save parameter checkpoints upon training. E.g.,
-        100 saves a checkpoint on each 100th training step.  By default only
-        the last checkpoint is retained; to keep all checkpoints make the
-        frequency negative instead of positive.  Specify None for no
-        checkpoints.  Note that checkpoints can be used to resume a training
-        run simply by resubmitting the same script; if a checkpoint file is
-        found it will be used.
-    randomseed : None or int
-        Seed to use in random number generator for making initial guess of
-        training parameters. You should only set this if you want a script to
-        always generate the same "random" initial parameters. This primarily
-        useful for unit tests or benchmarking.
+        100 saves a checkpoint on each 100th training setp.  Specify None for
+        no checkpoints. Note: You can make this negative to not overwrite
+        previous checkpoints.
 
     .. note:: Dimensions of weight two dimensional arrays should be consistent
               with hiddenlayers.
@@ -106,9 +91,9 @@ class NeuralNetwork(Model):
     """
 
     def __init__(self, hiddenlayers=(5, 5), activation='tanh', weights=None,
-                 scalings=None, fprange=None, mode=None, version=None,
-                 regressor=None, lossfunction=None, fortran=True,
-                 checkpoints=100, randomseed=None, prescale=False):
+                 scalings=None, fprange=None, regressor=None, mode=None,
+                 lossfunction=None, version=None, fortran=True,
+                 checkpoints=100):
 
         # Version check, particularly if restarting.
         compatibleversions = ['2015.12', ]
@@ -141,14 +126,12 @@ class NeuralNetwork(Model):
             raise NotImplementedError(_)
 
         self.regressor = regressor
-        self.parent = None  # Will hold a reference to main Amp instance.
+        self.parent = None  # Can hold a reference to main Amp instance.
         self.lossfunction = lossfunction
         self.fortran = fortran
         self.checkpoints = checkpoints
         if self.lossfunction is None:
             self.lossfunction = LossFunction()
-        self.randomseed = randomseed
-        self.prescale = prescale
 
     def fit(self,
             trainingimages,
@@ -178,19 +161,16 @@ class NeuralNetwork(Model):
             variables but skips the last line of starting the regressor.
         """
 
-        self._log = log
-        self._load_from_checkpoints()  # if present; resume training
-
         # Set all parameters and report to logfile.
         self._parallel = parallel
+        self._log = log
 
         if self.regressor is None:
             self.regressor = Regressor()
 
         p = self.parameters
-
         tp = self.trainingparameters = Parameters()
-        tp.images = trainingimages
+        tp.trainingimages = trainingimages
         tp.descriptor = descriptor
 
         if p.mode is None:
@@ -220,24 +200,21 @@ class NeuralNetwork(Model):
 
         if p.weights is None:
             log('Initializing with random weights.')
-            self.randomize(scalings=False, seed=self.randomseed)
+            if p.mode == 'image-centered':
+                raise NotImplementedError('Needs to be coded.')
+            elif p.mode == 'atom-centered':
+                p.weights = get_random_weights(p.hiddenlayers, p.activation,
+                                               None, p.fprange)
         else:
             log('Initial weights already present.')
 
-        if p.scalings is None and self.prescale is True:
-            self.log('Finding good guesses for scaling intercepts...',
-                     tic='prescale')
-            self.prescale_intercepts(trainingimages)
-            self.log(' Atomic energies found:')
-            for element in self.parameters.scalings.keys():
-                self.log('{:2s}: {:14.4f}'.format(
-                    element, self.parameters.scalings[element]['intercept']))
-            self.log('...prescale complete.', toc='prescale')
-
         if p.scalings is None:
             log('Initializing with random scalings.')
-            self.randomize(weights=False, trainingimages=trainingimages,
-                           seed=self.randomseed)
+            if p.mode == 'image-centered':
+                raise NotImplementedError('Need to code.')
+            elif p.mode == 'atom-centered':
+                p.scalings = get_random_scalings(trainingimages, p.activation,
+                                                 p.fprange.keys())
         else:
             log('Initial scalings already present.')
 
@@ -245,79 +222,9 @@ class NeuralNetwork(Model):
             return
 
         # Regress the model.
+        self.step = 0
         result = self.regressor.regress(model=self, log=log)
         return result  # True / False
-
-    def prescale_intercepts(self, trainingimages):
-        """Calculates a reasonable guess for the per-atom energy, by regressing
-        a one-parameter-per-element model (per-atom energies), and uses this as
-        the scaling energy. This is a reasonably inefficient
-        residual-minimization technique, but doesn't typically bottleneck the
-        code. The slopes are not explicitly calculated, and take as w """
-
-        # This still assumes slope=1 is a goood guess.
-        # But in units of eV, it's not bad.
-
-        elements = self.parameters.fprange.keys()
-
-        def get_rmse_per_atom(scalings_list):
-            scalings = {element: scaling for
-                        (element, scaling) in zip(elements, scalings_list)}
-            calc = OffsetCalculator(scalings=scalings)
-            msea = 0.  # mean-squared (error per atom)
-            for image in trainingimages.values():
-                true_energy = image.get_potential_energy(
-                        apply_constraint=False)
-                predicted_energy = calc.get_potential_energy(image)
-                msea += ((true_energy - predicted_energy) / len(image))**2
-            return np.sqrt(msea)  # root-mean-squared (error per atom)
-
-        answer = fmin(get_rmse_per_atom, x0=[1.]*len(elements))
-        scaling_intercepts = {element: intercept for element, intercept in
-                              zip(elements, answer)}
-        p = self.parameters
-        p.scalings = {}
-        for element in elements:
-            p.scalings[element] = {'intercept': scaling_intercepts[element],
-                                   'slope': 1.}
-
-    def randomize(self, trainingimages=None, weights=True, scalings=True,
-                  seed=None):
-        """Randomizes the model parameters (i.e., re-initializes them);
-        this is typically used just before training.
-
-        Parameters
-        ----------
-        trainingimages : list
-            List of ASE atoms objects that are being trained. This is only
-            needed if scalings is True.
-        weights : bool
-            If False, do not randomize weights.
-        scalings : bool
-            If False, do not randomize scalings.
-        seed : None or int
-            Seed to use in random number generator for making initial guess of
-            training parameters. You should only set this if you want a script
-            to always generate the same "random" initial parameters. This
-            primarily useful for unit tests or benchmarking.
-        """
-        p = self.parameters
-        if weights:
-            if p.mode == 'image-centered':
-                raise NotImplementedError('Needs to be coded.')
-            elif p.mode == 'atom-centered':
-                len_of_fps = {element: len(p.fprange[element])
-                              for element in p.fprange.keys()}
-                p.weights = get_random_weights(hiddenlayers=p.hiddenlayers,
-                                               activation=p.activation,
-                                               len_of_fps=len_of_fps,
-                                               seed=seed,)
-        if scalings:
-            if p.mode == 'image-centered':
-                raise NotImplementedError('Need to code.')
-            elif p.mode == 'atom-centered':
-                p.scalings = get_initial_scalings(trainingimages, p.activation,
-                                                  p.fprange.keys())
 
     @property
     def forcetraining(self):
@@ -358,7 +265,7 @@ class NeuralNetwork(Model):
         p['weights'] = weights
         p['scalings'] = scalings
 
-    def get_loss(self, vector, lossprime):
+    def get_loss(self, vector):
         """Method to be called by the regression master.
 
         Takes one and only one input, a vector of parameters.
@@ -369,56 +276,44 @@ class NeuralNetwork(Model):
         vector : list
             Parameters of the regression model in the form of a list.
         """
-        if self.lossfunction._step == 0:
+        if self.step == 0:
             filename = make_filename(self.parent.label,
                                      '-initial-parameters.amp')
-            if not os.path.exists(filename):
-                # If it exists, must be resuming from checkpoints.
-                filename = self.parent.save(filename)
-        result = self.lossfunction.get_loss(vector, lossprime=lossprime)
+            filename = self.parent.save(filename, overwrite=True)
         if self.checkpoints:
-            if self.lossfunction._step % self.checkpoints == 0:
+            if self.step % self.checkpoints == 0:
                 self._log('Saving checkpoint data.')
                 if self.checkpoints < 0:
                     path = os.path.join(self.parent.label + '-checkpoints')
-                    if not os.path.exists(path):
-                        os.mkdir(path)
+                    if self.step == 0:
+                        if not os.path.exists(path):
+                            os.mkdir(path)
                     filename = os.path.join(path,
-                                            '{}.amp'.format(int(self.lossfunction._step)))
+                                            '{}.amp'.format(int(self.step)))
                 else:
                     filename = make_filename(self.parent.label,
                                              '-checkpoint.amp')
                 self.parent.save(filename, overwrite=True)
+        loss = self.lossfunction.get_loss(vector, lossprime=False)['loss']
         if hasattr(self, 'observer'):
             self.observer(self, vector, loss)
+        self.step += 1
+        return loss
 
-        if lossprime:
-            return result['loss'], result['dloss_dparameters']
-        else:
-            return result['loss']
+    def get_lossprime(self, vector):
+        """Method to be called by the regression master.
 
+        Takes one and only one input, a vector of parameters.  Returns one
+        output, the value of the derivative of the loss function with respect
+        to model parameters.
 
-    def _load_from_checkpoints(self):
-        """If checkpoints are present, this will load from them and therefore
-        resume a previous training run."""
-        # Check default checkpoint pattern.
-        filename = make_filename(self.parent.label, '-checkpoint.amp')
-        dirname = os.path.join(self.parent.label + '-checkpionts')
-        if os.path.exists(filename):
-            calc = Amp.load(filename, logging=False)
-        elif os.path.exists(dirname):
-            checkpoints = os.listdir(dirname)
-            last = sorted([int(_[:-4]) for _ in checkpoints])[-1]
-            filename = os.path.join(dirname, '{}.amp'.format(last))
-            calc = Amp.load(filename, logging=False)
-            self.lossfunction._step = last
-        else:
-            return  # No checkpoints present; run normally.
-        self._log('Found checkpoint file: {}.'.format(filename))
-        p = calc.model.parameters
-        self.parameters = p
-        self._log('Loaded last neural network parameters from checkpoint. '
-                  'Resuming training run.')
+        Parameters
+        ----------
+        vector : list
+            Parameters of the regression model in the form of a list.
+        """
+        return self.lossfunction.get_loss(vector,
+                                          lossprime=True)['dloss_dparameters']
 
     @property
     def lossfunction(self):
@@ -494,10 +389,10 @@ class NeuralNetwork(Model):
         direction : int
             Direction of force.
         nindex : int
-            Index of the atom at which force is acting.  (only used in
+            Index of the neighbor atom which force is acting at.  (only used in
             the atom-centered mode)
         nsymbol : str
-            Symbol of the atom at which force is acting.  (only used
+            Symbol of the neighbor atom which force is acting at.  (only used
             in the atom-centered mode)
 
         Returns
@@ -513,8 +408,10 @@ class NeuralNetwork(Model):
 
         force = float((scaling['slope'] *
                        dOutputs_dInputs[len(dOutputs_dInputs) - 1][0]))
-        # Force is multiplied by -1, because it is -dE/dx and not dE/dx.
-        return -force
+        # force is multiplied by -1, because it is -dE/dx and not dE/dx.
+        force *= -1.
+
+        return force
 
     def calculate_dAtomicEnergy_dParameters(self, afp, index=None,
                                             symbol=None):
@@ -541,14 +438,14 @@ class NeuralNetwork(Model):
         """
         p = self.parameters
         scaling = p.scalings[symbol]
-        # W dictionary initiated.
-        W = {}
+        # self.W dictionary initiated.
+        self.W = {}
         for elm in p.weights.keys():
-            W[elm] = {}
+            self.W[elm] = {}
             weight = p.weights[elm]
             for _ in range(len(weight)):
-                W[elm][_ + 1] = np.delete(weight[_ + 1], -1, 0)
-        W = W[symbol]
+                self.W[elm][_ + 1] = np.delete(weight[_ + 1], -1, 0)
+        W = self.W[symbol]
 
         dAtomicEnergy_dParameters = np.zeros(self.ravel.count)
         dAtomicEnergy_dWeights, dAtomicEnergy_dScalings = \
@@ -587,10 +484,10 @@ class NeuralNetwork(Model):
         direction : int
             Direction of force.
         nindex : int
-            Index of the atom at which force is acting.  (only used in            
+            Index of the neighbor atom which force is acting at.  (only used in
             the atom-centered mode)
         nsymbol : str
-            Symbol of the atom at which force is acting.  (only used
+            Symbol of the neighbor atom which force is acting at.  (only used
             in the atom-centered mode)
 
         Returns
@@ -602,14 +499,14 @@ class NeuralNetwork(Model):
         p = self.parameters
         scaling = p.scalings[nsymbol]
         activation = p.activation
-        # W dictionary initiated.
-        W = {}
+        # self.W dictionary initiated.
+        self.W = {}
         for elm in p.weights.keys():
-            W[elm] = {}
+            self.W[elm] = {}
             weight = p.weights[elm]
             for _ in range(len(weight)):
-                W[elm][_ + 1] = np.delete(weight[_ + 1], -1, 0)
-        W = W[nsymbol]
+                self.W[elm][_ + 1] = np.delete(weight[_ + 1], -1, 0)
+        W = self.W[nsymbol]
 
         dForce_dParameters = np.zeros(self.ravel.count)
 
@@ -778,9 +675,6 @@ def calculate_nodal_outputs(parameters, afp, symbol,):
 
 def calculate_dOutputs_dInputs(parameters, derafp, outputs, nsymbol,):
     """
-    Calculates the derivative of the neural network nodes with respect
-    to the inputs.
-
     Parameters
     ----------
     parameters : dict
@@ -898,8 +792,8 @@ def calculate_ohat_D_delta(parameters, outputs, W):
     return ohat, D, delta
 
 
-def get_random_weights(hiddenlayers, activation,
-                       len_of_fps=None, no_of_atoms=None, seed=None):
+def get_random_weights(hiddenlayers, activation, no_of_atoms=None,
+                       fprange=None):
     """Generates random weight arrays from variables.
 
     hiddenlayers: dict
@@ -927,19 +821,16 @@ def get_random_weights(hiddenlayers, activation,
         Assigns the type of activation funtion. "linear" refers to linear
         function, "tanh" refers to tanh function, and "sigmoid" refers to
         sigmoid function.
-    len_of_fps : dict
-        Length of fingerprints of each element, e.g:
-
-        >>> len_of_fps={"O": 20, "Pd":20}
-
     no_of_atoms : int
         Number of atoms in atomic systems; used only in the case of no
         descriptor.
-    seed : None or int
-        Seed to use in random number generator for making initial guess of
-        training parameters. You should only set this if you want a script to
-        always generate the same "random" initial parameters. This primarily
-        useful for unit tests or benchmarking.
+
+    fprange : dict
+        Range of fingerprints of each chemical species.  Should be fed as
+        a dictionary of chemical species and a list of minimum and maximun,
+        e.g:
+
+        >>> fprange={"Pd": [0.31, 0.59], "O":[0.56, 0.72]}
 
     Returns
     -------
@@ -947,7 +838,6 @@ def get_random_weights(hiddenlayers, activation,
         weights
     """
 
-    rs = np.random.RandomState(seed=seed)
     weight = {}
     nn_structure = {}
 
@@ -967,7 +857,7 @@ def get_random_weights(hiddenlayers, activation,
         epsilon = np.sqrt(6. / (nn_structure[0] +
                                 nn_structure[1]))
         normalized_arg_range = 2. * epsilon
-        weight[1] = rs.random_sample((3 * no_of_atoms + 1,
+        weight[1] = np.random.random((3 * no_of_atoms + 1,
                                       nn_structure[1])) * \
             normalized_arg_range - \
             normalized_arg_range / 2.
@@ -976,7 +866,7 @@ def get_random_weights(hiddenlayers, activation,
             epsilon = np.sqrt(6. / (nn_structure[layer + 1] +
                                     nn_structure[layer + 2]))
             normalized_arg_range = 2. * epsilon
-            weight[layer + 2] = rs.random_sample(
+            weight[layer + 2] = np.random.random(
                 (nn_structure[layer + 1] + 1,
                  nn_structure[layer + 2])) * \
                 normalized_arg_range - normalized_arg_range / 2.
@@ -985,7 +875,7 @@ def get_random_weights(hiddenlayers, activation,
                                 nn_structure[-1]))
         normalized_arg_range = 2. * epsilon
         weight[len(list(nn_structure)) - 1] = \
-            rs.random_sample((nn_structure[-2] + 1, 1)) \
+            np.random.random((nn_structure[-2] + 1, 1)) \
             * normalized_arg_range - normalized_arg_range / 2.
 
         if False:  # This seemed to be setting all biases to zero?
@@ -996,15 +886,16 @@ def get_random_weights(hiddenlayers, activation,
                     weight[_ + 1][-1][__] = 0.
 
     else:
-        elements = hiddenlayers.keys()
+        elements = fprange.keys()
+
         for element in sorted(elements):
-            _len_of_fps = len_of_fps[element]
+            len_of_fps = len(fprange[element])
             if isinstance(hiddenlayers[element], int):
-                nn_structure[element] = ([_len_of_fps] +
+                nn_structure[element] = ([len_of_fps] +
                                          [hiddenlayers[element]] + [1])
             else:
                 nn_structure[element] = (
-                    [_len_of_fps] +
+                    [len_of_fps] +
                     [layer for layer in hiddenlayers[element]] + [1])
             weight[element] = {}
             # Instead try Andrew Ng coursera approach. +/- epsilon
@@ -1014,15 +905,17 @@ def get_random_weights(hiddenlayers, activation,
             epsilon = np.sqrt(6. / (nn_structure[element][0] +
                                     nn_structure[element][1]))
             normalized_arg_range = 2. * epsilon
-            weight[element][1] = (rs.random_sample(
-                (_len_of_fps + 1, nn_structure[element][1])) *
-                normalized_arg_range - normalized_arg_range / 2.)
+            weight[element][1] = np.random.random((len(fprange[element]) + 1,
+                                                   nn_structure[
+                                                   element][1])) * \
+                normalized_arg_range - \
+                normalized_arg_range / 2.
             len_of_hiddenlayers = len(list(nn_structure[element])) - 3
             for layer in range(len_of_hiddenlayers):
                 epsilon = np.sqrt(6. / (nn_structure[element][layer + 1] +
                                         nn_structure[element][layer + 2]))
                 normalized_arg_range = 2. * epsilon
-                weight[element][layer + 2] = rs.random_sample(
+                weight[element][layer + 2] = np.random.random(
                     (nn_structure[element][layer + 1] + 1,
                      nn_structure[element][layer + 2])) * \
                     normalized_arg_range - normalized_arg_range / 2.
@@ -1031,7 +924,7 @@ def get_random_weights(hiddenlayers, activation,
                                     nn_structure[element][-1]))
             normalized_arg_range = 2. * epsilon
             weight[element][len(list(nn_structure[element])) - 1] = \
-                rs.random_sample((nn_structure[element][-2] + 1, 1)) \
+                np.random.random((nn_structure[element][-2] + 1, 1)) \
                 * normalized_arg_range - normalized_arg_range / 2.
 
             if False:  # This seemed to be setting all biases to zero?
@@ -1044,7 +937,7 @@ def get_random_weights(hiddenlayers, activation,
     return weight
 
 
-def get_initial_scalings(images, activation, elements=None, seed=None):
+def get_random_scalings(images, activation, elements=None):
     """Generates initial scaling matrices, such that the range of activation is
     scaled to the range of actual energies.
 
@@ -1130,6 +1023,7 @@ def get_initial_scalings(images, activation, elements=None, seed=None):
 
 
 class Raveler:
+
     """Class to ravel and unravel variable values into a single vector.
 
     This is used for feeding into the optimizer. Feed in a list of dictionaries
@@ -1290,7 +1184,6 @@ class NodePlot:
         """Accumulates the data for the symbol."""
         data = self.data
         layerkeys = list(output.keys())  # Correspond to layers.
-        layerkeys.sort()
 
         if symbol not in data:
             # Create headers, structure.
@@ -1313,20 +1206,3 @@ class NodePlot:
         """Converts the data table into a numpy array."""
         for symbol in self.data:
             self.data[symbol]['table'] = np.array(self.data[symbol]['table'])
-
-
-class OffsetCalculator:
-    """A calculator in which energy is only a sum of one-body atomic terms,
-    with an energy per element type. This is used to calculate the scaling
-    parameters."""
-
-    def __init__(self, scalings):
-        """Scalings is a dictionary [element:energy]."""
-        self.scalings = scalings
-
-    def get_potential_energy(self, atoms):
-        """Calculate a crude potential energy."""
-        energy = 0.
-        for atom in atoms:
-            energy += self.scalings[atom.symbol]
-        return energy
